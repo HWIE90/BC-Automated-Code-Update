@@ -32,20 +32,23 @@ jobs:
         shell: pwsh
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          $v = "${{ env.AL_EXT_VERSION }}"
-          $vsixUrl = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-dynamics-smb/vsextensions/al/$v/vspackage"
-          Invoke-WebRequest -Uri $vsixUrl -OutFile al.vsix
+          $vsixUrl = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-dynamics-smb/vsextensions/al/latest/vspackage"
+          Write-Host "Downloading AL Language from: $vsixUrl"
+          Invoke-WebRequest -Uri $vsixUrl -OutFile al.vsix -UseBasicParsing
+          if (!(Test-Path al.vsix) -or ((Get-Item al.vsix).Length -lt 100KB)) {
+            throw "Download failed or file too small."
+          }
 
       - name: Extract alc.exe from VSIX
         shell: pwsh
         run: |
-          # VSIX ist ein ZIP – wir entpacken nur den Ordner mit alc.exe
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [System.IO.Compression.ZipFile]::ExtractToDirectory("al.vsix", "al_ext")
-          # Finde alc.exe (liegt unter extension/bin/ bzw. ähnlichem Pfad)
           $alc = Get-ChildItem -Path "al_ext" -Recurse -Filter "alc.exe" | Select-Object -First 1
-          if (-not $alc) { throw "alc.exe not found in VSIX. Check AL_EXT_VERSION." }
-          # Pfad für späteren Aufruf merken
+          if (-not $alc) { 
+            Get-ChildItem -Path "al_ext" -Recurse | Select-Object FullName,Length | Out-Host
+            throw "alc.exe not found in VSIX structure" 
+          }
           echo "ALC_PATH=$($alc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       # 4) Build-Ordner anlegen
