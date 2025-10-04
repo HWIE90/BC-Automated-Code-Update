@@ -1,0 +1,81 @@
+name: build-and-deploy
+
+on:
+  workflow_dispatch: {}          # Manuell startbar ("Run workflow")
+  push:
+    branches: [ "main" ]         # Optional: bei Push auf main automatisch starten
+
+jobs:
+  build:
+    runs-on: windows-latest      # Wir brauchen Windows für alc.exe
+
+    env:
+      # Passe diese Version an, falls der Build meckert.
+      # Für BC v24 (Runtime 13.0) funktioniert i.d.R. eine 13.x AL-Erweiterung.
+      AL_EXT_VERSION: "13.3.620791"   # Beispiel – bei Bedarf anpassen
+
+    steps:
+      # 1) Repo auschecken
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2) Build-Cache für AL-Paketcache (beschleunigt Folge-Builds)
+      - name: Cache AL package cache
+        uses: actions/cache@v4
+        with:
+          path: ./.alcache
+          key: alcache-${{ runner.os }}-${{ hashFiles('bc/src/app.json') }}
+
+      # 3) AL-Compiler (alc.exe) bereitstellen
+      #    Wir laden die "AL Language" VSIX von Microsoft herunter und entpacken alc.exe daraus.
+      - name: Download AL Language VSIX
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $v = "${{ env.AL_EXT_VERSION }}"
+          $vsixUrl = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-dynamics-smb/vsextensions/al/$v/vspackage"
+          Invoke-WebRequest -Uri $vsixUrl -OutFile al.vsix
+
+      - name: Extract alc.exe from VSIX
+        shell: pwsh
+        run: |
+          # VSIX ist ein ZIP – wir entpacken nur den Ordner mit alc.exe
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory("al.vsix", "al_ext")
+          # Finde alc.exe (liegt unter extension/bin/ bzw. ähnlichem Pfad)
+          $alc = Get-ChildItem -Path "al_ext" -Recurse -Filter "alc.exe" | Select-Object -First 1
+          if (-not $alc) { throw "alc.exe not found in VSIX. Check AL_EXT_VERSION." }
+          # Pfad für späteren Aufruf merken
+          echo "ALC_PATH=$($alc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # 4) Build-Ordner anlegen
+      - name: Prepare dist
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path "bc/dist" | Out-Null
+
+      # 5) AL build (.app erzeugen)
+      - name: Build .app with alc
+        shell: pwsh
+        run: |
+          & "${env:ALC_PATH}" /project:"./bc/src" /packagecachepath:"./.alcache" /out:"./bc/dist/extension.app"
+          if ($LASTEXITCODE -ne 0) { throw "ALC build failed." }
+
+      # 6) BcContainerHelper installieren (liefert Publish-Cmdlets für SaaS)
+      - name: Install BcContainerHelper
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
+          Install-Module BcContainerHelper -Scope CurrentUser -Force
+          Import-Module  BcContainerHelper
+
+      # 7) Publish in Business Central (SaaS) – nutzt deine Secrets
+      - name: Publish to Business Central (SaaS)
+        shell: pwsh
+        env:
+          BC_MODE:           ${{ secrets.BC_MODE }}
+          BC_TENANT_ID:      ${{ secrets.BC_TENANT_ID }}
+          BC_CLIENT_ID:      ${{ secrets.BC_CLIENT_ID }}
+          BC_CLIENT_SECRET:  ${{ secrets.BC_CLIENT_SECRET }}
+          BC_ENV_NAME:       ${{ secrets.BC_ENV_NAME }}
+        run: |
+          ./ci/publish.ps1 -AppPath "bc/dist/extension.app"
