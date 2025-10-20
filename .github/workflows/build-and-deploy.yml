@@ -48,7 +48,7 @@ jobs:
 
           # Lade Artefakte in einen lokalen Ordner
           $art = Download-Artifacts -artifactUrl $artifactUrl -includePlatform -verbose
-          $root = $art | Select-Object -ExpandProperty downloadFolder
+          $root = $art | Select-Object -ExpandProperty C:\bcartifacts.cache\sandbox\25.5.30849.41164\de
           Write-Host "Artifacts downloaded to: $root"
 
           # Suche *.app mit System & Application (unabhängig vom genauen Pfad)
