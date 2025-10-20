@@ -14,24 +14,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Cache für Paket-/Symbolordner (schneller bei Folge-Builds)
+      # 2) Cache für Paket-/Symbolordner
       - name: Cache AL package cache
         uses: actions/cache@v4
         with:
           path: |
-            ./.alcache
             ./.alpackages
-          key: alcache-${{ runner.os }}-${{ hashFiles('bc/src/app.json') }}
+          key: alpackages-${{ runner.os }}-${{ hashFiles('bc/src/app.json') }}
 
       # 3) Ordner anlegen
       - name: Ensure build folders
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path ".alcache" | Out-Null
           New-Item -ItemType Directory -Force -Path ".alpackages" | Out-Null
           New-Item -ItemType Directory -Force -Path "bc/dist" | Out-Null
 
-      # 4) BcContainerHelper (nur Module – kein Docker nötig)
+      # 4) BcContainerHelper-Module (wir nutzen nur die Artifact-Helper)
       - name: Install BcContainerHelper
         shell: pwsh
         run: |
@@ -39,19 +37,16 @@ jobs:
           Install-Module BcContainerHelper -Scope CurrentUser -Force
           Import-Module  BcContainerHelper
 
-      # 5) System & Application Symbole für BC v25 aus BC-Artifacts holen
+      # 5) Symbole (System & Application) für BC v25 (W1) aus den Artifacts kopieren
+      #    W1 ist kleiner/schneller und reicht i.d.R. für System/Application.
       - name: Download BC v25 symbols (System & Application)
         shell: pwsh
         run: |
-          $artifactUrl = Get-BCArtifactUrl -type Sandbox -version 25 -country de
+          $artifactUrl = Get-BCArtifactUrl -type Sandbox -version 25 -country w1
           Write-Host "Artifact URL: $artifactUrl"
-
-          # Lade Artefakte in einen lokalen Ordner
-          $art = Download-Artifacts -artifactUrl $artifactUrl -includePlatform -verbose
-          $root = $art | Select-Object -ExpandProperty C:\bcartifacts.cache\sandbox\25.5.30849.41164\de
+          $root = Download-Artifacts -artifactUrl $artifactUrl -includePlatform -verbose
           Write-Host "Artifacts downloaded to: $root"
 
-          # Suche *.app mit System & Application (unabhängig vom genauen Pfad)
           $apps = Get-ChildItem -Path $root -Recurse -Filter *.app
           $systemApp = $apps | Where-Object { $_.Name -match '^Microsoft_.*System.*\.app$' } | Select-Object -First 1
           $applicationApp = $apps | Where-Object { $_.Name -match '^Microsoft_.*Application.*\.app$' } | Select-Object -First 1
@@ -88,7 +83,7 @@ jobs:
           }
           echo "ALC_PATH=$($alc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # 7) (Optional) Verzeichnisübersicht fürs Debugging
+      # 7) Debug: Projekt- und Symbolübersicht
       - name: Show repo tree (debug)
         shell: pwsh
         run: |
@@ -97,7 +92,7 @@ jobs:
           Write-Host "=== Symbol packages in .alpackages ==="
           Get-ChildItem ".alpackages" | Select-Object Name, Length | Format-Table -AutoSize
 
-      # 8) Build .app
+      # 8) Build .app mit alc (nutzt .alpackages)
       - name: Build .app with alc
         shell: pwsh
         run: |
