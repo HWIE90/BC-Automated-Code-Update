@@ -57,6 +57,12 @@ jobs:
         run: New-Item -ItemType Directory -Force -Path "bc/dist" | Out-Null
 
       # 5) AL build (.app erzeugen)
+      - name: Ensure build folders
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ".alcache" | Out-Null
+          New-Item -ItemType Directory -Force -Path "bc/dist" | Out-Null
+      
       - name: Build .app with alc
         shell: pwsh
         run: |
