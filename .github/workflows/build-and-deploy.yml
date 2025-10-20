@@ -1,75 +1,37 @@
 name: build-and-deploy
 
 on:
-  workflow_dispatch: {}          # Manuell startbar ("Run workflow")
+  workflow_dispatch: {}
   push:
-    branches: [ "main" ]         # Optional: bei Push auf main automatisch starten
+    branches: [ "main" ]
 
 jobs:
   build:
-    runs-on: windows-latest      # Wir brauchen Windows für alc.exe
-
-    env:
-      # Passe diese Version an, falls der Build meckert.
-      # Für BC v24 (Runtime 13.0) funktioniert i.d.R. eine 13.x AL-Erweiterung.
-      AL_EXT_VERSION: "13.3.620791"   # Beispiel – bei Bedarf anpassen
+    runs-on: windows-latest
 
     steps:
       # 1) Repo auschecken
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Build-Cache für AL-Paketcache (beschleunigt Folge-Builds)
+      # 2) Cache für Paket-/Symbolordner (schneller bei Folge-Builds)
       - name: Cache AL package cache
         uses: actions/cache@v4
         with:
-          path: ./.alcache
+          path: |
+            ./.alcache
+            ./.alpackages
           key: alcache-${{ runner.os }}-${{ hashFiles('bc/src/app.json') }}
 
-      # 3) AL-Compiler (alc.exe) bereitstellen
-      #    Wir laden die "AL Language" VSIX von Microsoft herunter und entpacken alc.exe daraus.
-      - name: Download AL Language VSIX
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-          $vsixUrl = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-dynamics-smb/vsextensions/al/latest/vspackage"
-          Write-Host "Downloading AL Language from: $vsixUrl"
-          Invoke-WebRequest -Uri $vsixUrl -OutFile al.vsix -UseBasicParsing
-          if (!(Test-Path al.vsix) -or ((Get-Item al.vsix).Length -lt 100KB)) {
-            throw "Download failed or file too small."
-          }
-
-      - name: Extract alc.exe from VSIX
-        shell: pwsh
-        run: |
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::ExtractToDirectory("al.vsix", "al_ext")
-          $alc = Get-ChildItem -Path "al_ext" -Recurse -Filter "alc.exe" | Select-Object -First 1
-          if (-not $alc) { 
-            Get-ChildItem -Path "al_ext" -Recurse | Select-Object FullName,Length | Out-Host
-            throw "alc.exe not found in VSIX structure" 
-          }
-          echo "ALC_PATH=$($alc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      # 4) Build-Ordner anlegen
-      - name: Prepare dist
-        shell: pwsh
-        run: New-Item -ItemType Directory -Force -Path "bc/dist" | Out-Null
-
-      # 5) AL build (.app erzeugen)
+      # 3) Ordner anlegen
       - name: Ensure build folders
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path ".alcache" | Out-Null
+          New-Item -ItemType Directory -Force -Path ".alpackages" | Out-Null
           New-Item -ItemType Directory -Force -Path "bc/dist" | Out-Null
-      
-      - name: Build .app with alc
-        shell: pwsh
-        run: |
-          & "${env:ALC_PATH}" /project:"./bc/src" /packagecachepath:"./.alcache" /out:"./bc/dist/extension.app"
-          if ($LASTEXITCODE -ne 0) { throw "ALC build failed." }
 
-      # 6) BcContainerHelper installieren (liefert Publish-Cmdlets für SaaS)
+      # 4) BcContainerHelper (nur Module – kein Docker nötig)
       - name: Install BcContainerHelper
         shell: pwsh
         run: |
@@ -77,7 +39,79 @@ jobs:
           Install-Module BcContainerHelper -Scope CurrentUser -Force
           Import-Module  BcContainerHelper
 
-      # 7) Publish in Business Central (SaaS) – nutzt deine Secrets
+      # 5) System & Application Symbole für BC v25 aus BC-Artifacts holen
+      - name: Download BC v25 symbols (System & Application)
+        shell: pwsh
+        run: |
+          $artifactUrl = Get-BCArtifactUrl -type Sandbox -version 25 -country de
+          Write-Host "Artifact URL: $artifactUrl"
+
+          # Lade Artefakte in einen lokalen Ordner
+          $art = Download-Artifacts -artifactUrl $artifactUrl -includePlatform -verbose
+          $root = $art | Select-Object -ExpandProperty downloadFolder
+          Write-Host "Artifacts downloaded to: $root"
+
+          # Suche *.app mit System & Application (unabhängig vom genauen Pfad)
+          $apps = Get-ChildItem -Path $root -Recurse -Filter *.app
+          $systemApp = $apps | Where-Object { $_.Name -match '^Microsoft_.*System.*\.app$' } | Select-Object -First 1
+          $applicationApp = $apps | Where-Object { $_.Name -match '^Microsoft_.*Application.*\.app$' } | Select-Object -First 1
+
+          if (-not $systemApp -or -not $applicationApp) {
+            $apps | Select-Object FullName | Out-Host
+            throw "Could not locate System/Application symbol apps in artifacts."
+          }
+
+          Copy-Item $systemApp.FullName      ".alpackages/Microsoft_System.app"       -Force
+          Copy-Item $applicationApp.FullName ".alpackages/Microsoft_Application.app" -Force
+
+          Write-Host "Copied symbols:"
+          Get-ChildItem ".alpackages" | Select-Object Name,Length | Format-Table -AutoSize
+
+      # 6) AL Language (VSIX) laden und alc.exe extrahieren
+      - name: Download AL Language VSIX (latest)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $vsixUrl = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-dynamics-smb/vsextensions/al/latest/vspackage"
+          Invoke-WebRequest -Uri $vsixUrl -OutFile al.vsix -UseBasicParsing
+          if (!(Test-Path al.vsix) -or ((Get-Item al.vsix).Length -lt 100KB)) { throw "AL VSIX download failed." }
+
+      - name: Extract alc.exe from VSIX
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory("al.vsix", "al_ext")
+          $alc = Get-ChildItem -Path "al_ext" -Recurse -Filter "alc.exe" | Select-Object -First 1
+          if (-not $alc) {
+            Get-ChildItem -Path "al_ext" -Recurse | Select-Object FullName,Length | Out-Host
+            throw "alc.exe not found in VSIX."
+          }
+          echo "ALC_PATH=$($alc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # 7) (Optional) Verzeichnisübersicht fürs Debugging
+      - name: Show repo tree (debug)
+        shell: pwsh
+        run: |
+          Write-Host "=== Files in bc/src ==="
+          Get-ChildItem -Recurse -File "bc/src" | Select-Object FullName, Length | Format-Table -AutoSize
+          Write-Host "=== Symbol packages in .alpackages ==="
+          Get-ChildItem ".alpackages" | Select-Object Name, Length | Format-Table -AutoSize
+
+      # 8) Build .app
+      - name: Build .app with alc
+        shell: pwsh
+        run: |
+          & "${env:ALC_PATH}" /project:"./bc/src" /packagecachepath:"./.alpackages" /out:"./bc/dist/extension.app"
+          if ($LASTEXITCODE -ne 0) { throw "ALC build failed." }
+
+      # 9) .app als Artifact sichern
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-app
+          path: bc/dist/extension.app
+
+      # 10) Publish in Business Central (SaaS) – nutzt deine Secrets
       - name: Publish to Business Central (SaaS)
         shell: pwsh
         env:
